@@ -1,0 +1,101 @@
+/*******************************************************************************
+ * @file    main.cpp
+ * @author  garou (xgaroux@gmail.com)
+ * @brief   Main module.
+ ******************************************************************************/
+
+ #include "gd32f30x.h"
+ #include <cstdint>
+ 
+ #define TIMER TIMER2
+ #define LED_PIN  GPIO_PIN_5   // Пин светодиода
+ #define LED_PORT GPIOA        // Порт светодиода
+ 
+ #define BOT_PIN GPIO_PIN_13
+
+ #define BOT_PORT GPIOC
+ 
+
+ 
+void timer_delay_init(void);
+void timer_delay_us(uint32_t us);
+void timer_delay_ms(uint32_t ms);
+void gpio_config(void);
+
+//volatile uint8_t BOT_DOWN = 0;
+volatile uint8_t LED_SOST = 0;
+
+void morgalka(){
+   for (int i = 0; i<3; i++){
+           gpio_bit_write(LED_PORT, LED_PIN, SET);
+           timer_delay_ms(150);
+           gpio_bit_write(LED_PORT, LED_PIN, RESET);
+           timer_delay_ms(150);    
+   }
+
+}
+
+extern "C" int main(void)
+{
+    gpio_config();
+    timer_delay_init();
+
+    while (1) {
+       while (gpio_input_bit_get(BOT_PORT, BOT_PIN) == 1);
+       LED_SOST ^= 1;  
+       if (LED_SOST) {
+           morgalka();
+           gpio_bit_write(LED_PORT, LED_PIN, SET);
+       } else {
+           morgalka();  
+       } 
+       while (gpio_input_bit_get(BOT_PORT, BOT_PIN) != 1);
+   }
+ 
+}
+
+
+
+void gpio_config(void)
+{
+    rcu_periph_clock_enable(RCU_GPIOA);
+    gpio_init(LED_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_50MHZ, LED_PIN);
+    ////
+    
+    rcu_periph_clock_enable(RCU_GPIOC);
+    gpio_init(GPIOC, GPIO_MODE_IPU, GPIO_OSPEED_50MHZ, GPIO_PIN_13);
+}
+
+void timer_delay_init(void)
+{
+    rcu_periph_clock_enable(RCU_TIMER2);
+
+    /* Настройка параметров таймера */
+    timer_deinit(TIMER);
+    timer_parameter_struct timer_initpara;
+    timer_initpara.prescaler         = (SystemCoreClock / 1000000) - 1;
+    timer_initpara.alignedmode       = TIMER_COUNTER_EDGE;
+    timer_initpara.counterdirection  = TIMER_COUNTER_UP;
+    timer_initpara.period            = 0xFFFFFFFF;
+    timer_initpara.clockdivision     = TIMER_CKDIV_DIV1;
+    timer_initpara.repetitioncounter = 0;
+    timer_init(TIMER, &timer_initpara);
+
+    /* Запускаем таймер */
+    timer_enable(TIMER);
+}
+
+void timer_delay_us(uint32_t us)
+{
+    uint32_t start = TIMER_CNT(TIMER);
+    while ((TIMER_CNT(TIMER) - start) < us);
+}
+
+void timer_delay_ms(uint32_t ms)
+{
+    while (ms--) {
+        timer_delay_us(1000);
+    }
+}
+
+/***************************** END OF FILE ************************************/
