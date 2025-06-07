@@ -1,0 +1,127 @@
+/*******************************************************************************
+ * @file    main.cpp
+ * @author  garou (xgaroux@gmail.com)
+ * @brief   Main module.
+ ******************************************************************************/
+
+ #include "gd32f30x.h"
+ #include "gd32f30x_exti.h"
+ #include "gd32f30x_usart.h"
+ #include <cstdint>
+ 
+ #define TIMER TIMER2
+ #define LED_PIN  GPIO_PIN_5   // Пин светодиода
+ #define LED_PORT GPIOA        // Порт светодиода
+ 
+ #define BOT_PIN GPIO_PIN_13
+ #define BOT_PORT GPIOC
+
+ typedef enum {
+    BUTTON_IDLE,
+    BUTTON_DEBOUNCE,
+    BUTTON_PRESSED
+} ButtonState;
+
+ void ButtonFSM(bool current_state);
+ 
+ void gpio_config(void);
+
+ /////////////////////////////
+ void exti_config(void);
+
+ volatile bool button_pressed = false;
+ volatile bool led_state = false;
+ ButtonState btn_state = BUTTON_IDLE;
+//////////////////////////////
+
+extern "C" int main(void)
+{
+gpio_config();
+//timer_delay_init();
+
+exti_config();
+
+
+
+while (1) {
+    
+
+    bool current_state = gpio_input_bit_get(BOT_PORT, BOT_PIN); // Читаем состояние кнопки
+        ButtonFSM(current_state);
+    if (button_pressed) {
+        button_pressed = false;
+        led_state = !led_state;
+        gpio_bit_write(LED_PORT, LED_PIN, led_state ? SET : RESET);
+    }
+    
+}
+}
+
+
+void gpio_config(void)
+ {
+     rcu_periph_clock_enable(RCU_GPIOA);
+     gpio_init(LED_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_50MHZ, LED_PIN);
+     ////
+     
+     rcu_periph_clock_enable(RCU_GPIOC);
+     gpio_init(GPIOC, GPIO_MODE_IPU, GPIO_OSPEED_50MHZ, GPIO_PIN_13);
+ }
+
+////////////////////////////////////////
+void exti_config(void)
+{
+    rcu_periph_clock_enable(RCU_AF); 
+
+    
+    gpio_exti_source_select(GPIO_PORT_SOURCE_GPIOC, GPIO_PIN_SOURCE_13);
+    exti_init(EXTI_13, EXTI_INTERRUPT, EXTI_TRIG_FALLING); // Прерывание по спаду (кнопка нажата)
+    exti_interrupt_flag_clear(EXTI_13); // Очищаем флаг прерывания
+
+    // Настраиваем NVIC (включаем прерывание EXTI15_10)
+    nvic_irq_enable(EXTI10_15_IRQn, 0, 0); // Приоритет 2, подприоритет 0
+}
+
+// Обработчик 
+extern "C" void EXTI10_15_IRQHandler(void)
+{
+    if (exti_interrupt_flag_get(EXTI_13) != RESET) {
+        button_pressed = true; 
+        exti_interrupt_flag_clear(EXTI_13); // Очищаем флаг прерывания
+    }
+}
+///////////////////////////////////////////////////
+
+void ButtonFSM(bool current_state) {
+    static bool prev_state = 1;
+    static uint32_t debounce_timer = 0;
+
+    switch(btn_state) {
+        case BUTTON_IDLE:
+            if (current_state != prev_state) {
+                btn_state = BUTTON_DEBOUNCE;
+                debounce_timer = 150; // 50 мс
+            }
+            break;
+
+        case BUTTON_DEBOUNCE:
+            if (--debounce_timer == 0) {
+                if (current_state == 0) btn_state = BUTTON_PRESSED;
+                else btn_state = BUTTON_IDLE;
+            }
+            break;
+
+        case BUTTON_PRESSED:
+            if (current_state == 1) { // Кнопка отпущена
+                btn_state = BUTTON_DEBOUNCE;
+                debounce_timer = 150;
+            }
+            break;
+    }
+    prev_state = current_state;
+}
+ 
+ 
+ 
+
+ /***************************** END OF FILE ************************************/
