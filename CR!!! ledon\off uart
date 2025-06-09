@@ -1,0 +1,177 @@
+/*******************************************************************************
+ * @file    main.cpp
+ * @author  garou (xgaroux@gmail.com)
+ * @brief   Main module.
+ ******************************************************************************/
+
+ #include "gd32f30x.h"
+ #include "gd32f30x_exti.h"
+ #include "gd32f30x_usart.h"
+ #include <stdio.h>
+ #include "gd32f30x_usart.h"
+ #include "gd32f30x_gpio.h"
+ #include <string.h>
+ #include <locale.h>
+ #include <cstdint>
+ 
+ #define TIMER TIMER2
+ #define LED_PIN  GPIO_PIN_5   // Пин светодиода
+ #define LED_PORT GPIOA        // Порт светодиода
+ 
+ #define BOT_PIN GPIO_PIN_13
+ #define BOT_PORT GPIOC
+ #define RX_BUF_SIZE 64
+ char rx_buf[RX_BUF_SIZE];
+ uint8_t rx_idx = 0;
+ volatile uint8_t rx_ready = 0;
+
+ typedef enum {
+    BUTTON_IDLE,
+    BUTTON_DEBOUNCE,
+    BUTTON_PRESSED
+} ButtonState;
+
+ void ButtonFSM(bool current_state);
+ 
+ void gpio_config(void);
+
+ /////////////////////////////
+ void exti_config(void);
+
+ volatile bool button_pressed = false;
+ volatile bool led_state = false;
+ ButtonState btn_state = BUTTON_IDLE;
+//////////////////////////////
+
+
+extern "C" int main(void)
+
+{
+gpio_config();
+//timer_delay_init();
+
+exti_config();
+
+
+setlocale(LC_ALL, "RUS");
+    // Включение тактирования портов и USART1
+    rcu_periph_clock_enable(RCU_GPIOA);
+    rcu_periph_clock_enable(RCU_USART1);
+
+    // Настройка GPIO: PA2 (TX) - альт. функция push-pull, PA3 (RX) - вход
+    gpio_init(GPIOA, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_2);
+    gpio_init(GPIOA, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, GPIO_PIN_3);
+
+    // Настройка USART1
+    usart_deinit(USART1);
+    usart_baudrate_set(USART1, 115200);
+    usart_word_length_set(USART1, USART_WL_8BIT);
+    usart_stop_bit_set(USART1, USART_STB_1BIT);
+    usart_parity_config(USART1, USART_PM_NONE);
+    usart_transmit_config(USART1, USART_TRANSMIT_ENABLE);
+    usart_receive_config(USART1, USART_RECEIVE_ENABLE);
+    usart_enable(USART1);
+
+    nvic_irq_enable(USART1_IRQn, 0, 0);
+    usart_interrupt_enable(USART1, USART_INT_RBNE);
+
+
+
+while (1) {
+    //bool current_state = gpio_input_bit_get(BOT_PORT, BOT_PIN);
+    //ButtonFSM(current_state);
+    //if (button_pressed) {
+    //    button_pressed = false;
+    //    led_state = !led_state;
+    //    gpio_bit_write(LED_PORT, LED_PIN, led_state ? SET : RESET);
+    //}
+
+    // Обработка команд из UART
+    if (rx_ready) {
+        rx_ready = 0;
+
+        
+
+        if (strcmp(rx_buf, "led on") == 0) {
+            gpio_bit_write(LED_PORT, LED_PIN, SET);
+            const char* msg = "LED ON\r\n";
+            for (const char* p = msg; *p; ++p) {
+                usart_data_transmit(USART1, *p);
+                while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+            }
+            memset(rx_buf, 0, RX_BUF_SIZE); // <--- Очистка буфера после обработки
+        } else if (strcmp(rx_buf, "led off") == 0) {
+            gpio_bit_write(LED_PORT, LED_PIN, RESET);
+            const char* msg = "LED OFF\r\n";
+            for (const char* p = msg; *p; ++p) {
+                usart_data_transmit(USART1, *p);
+                while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+            }
+            memset(rx_buf, 0, RX_BUF_SIZE); // <--- Очистка буфера после обработки
+        } else {
+            const char* msg = "Unknown command\r\n";
+            for (const char* p = msg; *p; ++p) {
+                usart_data_transmit(USART1, *p);
+                while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+            }
+            memset(rx_buf, 0, RX_BUF_SIZE); // <--- Очистка буфера после обработки
+        }
+    }
+}
+}
+
+extern "C" void USART1_IRQHandler(void)
+{
+    if (usart_interrupt_flag_get(USART1, USART_INT_FLAG_RBNE) != RESET) {
+        uint8_t ch = usart_data_receive(USART1);
+        // Отладка: эхо каждого символа
+        //sprintf("otladka: \r");
+        //usart_data_transmit(USART1, ch);
+        while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+
+        if ((ch == '\r' || ch == '\n') && rx_idx > 0) {
+            rx_buf[rx_idx] = 0;
+            rx_ready = 1;
+            rx_idx = 0;
+        } else if (rx_idx < RX_BUF_SIZE - 1 && ch != '\r' && ch != '\n') {
+            rx_buf[rx_idx++] = ch;
+            
+        } else if (rx_idx >= RX_BUF_SIZE - 1) {
+            rx_idx = 0;
+        }
+    }
+}
+
+
+void gpio_config(void)
+ {
+     rcu_periph_clock_enable(RCU_GPIOA);
+     gpio_init(LED_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_50MHZ, LED_PIN);
+     ////
+     
+     rcu_periph_clock_enable(RCU_GPIOC);
+     gpio_init(GPIOC, GPIO_MODE_IPU, GPIO_OSPEED_50MHZ, GPIO_PIN_13);
+ }
+
+////////////////////////////////////////
+void exti_config(void)
+{
+    rcu_periph_clock_enable(RCU_AF); 
+
+    
+    gpio_exti_source_select(GPIO_PORT_SOURCE_GPIOC, GPIO_PIN_SOURCE_13);
+    exti_init(EXTI_13, EXTI_INTERRUPT, EXTI_TRIG_FALLING); // Прерывание по спаду (кнопка нажата)
+    exti_interrupt_flag_clear(EXTI_13); // Очищаем флаг прерывания
+
+    // Настраиваем NVIC (включаем прерывание EXTI15_10)
+    nvic_irq_enable(EXTI10_15_IRQn, 0, 0); // Приоритет 2, подприоритет 0
+}
+
+// Обработчик 
+
+///////////////////////////////////////////////////
+
+
+ 
+
+ /***************************** END OF FILE ************************************/
