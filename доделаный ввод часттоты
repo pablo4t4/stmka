@@ -12,6 +12,7 @@
  #include <string.h>
  #include <locale.h>
  #include <cstdint>
+ #include <stdlib.h>
  
  #define TIMER TIMER2
  #define LED_PIN  GPIO_PIN_5   // Пин светодиода
@@ -30,74 +31,29 @@
     BUTTON_PRESSED
 } ButtonState;
 
- void ButtonFSM(bool current_state);
+void ButtonFSM(bool current_state);
  
- void gpio_config(void);
+void gpio_config(void);
+void exti_config(void);
+volatile bool button_pressed = false;
+volatile bool led_state = false;
+ButtonState btn_state = BUTTON_IDLE;
+volatile uint8_t LED_SOST = 0;
 
- /////////////////////////////
- void exti_config(void);
-
- volatile bool button_pressed = false;
- volatile bool led_state = false;
- ButtonState btn_state = BUTTON_IDLE;
- volatile uint8_t LED_SOST = 0;
-//////////////////////////////
 void timer_delay_init(void);
 void timer_delay_us(uint32_t us);
 void timer_delay_ms(uint32_t ms);
 void gpio_config(void);
+void morgalka(uint32_t freq);
 
 
 
-void morgalka(){
-   for (int i = 0; i<3; i++){
-           gpio_bit_write(LED_PORT, LED_PIN, SET);
-           timer_delay_ms(150);
-           gpio_bit_write(LED_PORT, LED_PIN, RESET);
-           timer_delay_ms(150);    
-   }
 
-}
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////
-void timer_delay_init(void)
-{
-    rcu_periph_clock_enable(RCU_TIMER2);
-
-    /* Настройка параметров таймера */
-    timer_deinit(TIMER);
-    timer_parameter_struct timer_initpara;
-    timer_initpara.prescaler         = (SystemCoreClock / 1000000) - 1;
-    timer_initpara.alignedmode       = TIMER_COUNTER_EDGE;
-    timer_initpara.counterdirection  = TIMER_COUNTER_UP;
-    timer_initpara.period            = 0xFFFFFFFF;
-    timer_initpara.clockdivision     = TIMER_CKDIV_DIV1;
-    timer_initpara.repetitioncounter = 0;
-    timer_init(TIMER, &timer_initpara);
-
-    /* Запускаем таймер */
-    timer_enable(TIMER);
-}
-
-void timer_delay_us(uint32_t us)
-{
-    uint32_t start = TIMER_CNT(TIMER);
-    while ((TIMER_CNT(TIMER) - start) < us);
-}
-
-void timer_delay_ms(uint32_t ms)
-{
-    while (ms--) {
-        timer_delay_us(1000);
-    }
-}
-/////////////////////////////////////////////////////////////////////////////////////////////////////
 extern "C" int main(void)
 
 {
 gpio_config();
-//timer_delay_init();
-
+timer_delay_init();
 exti_config();
 
 
@@ -132,34 +88,15 @@ while (1) {
         button_pressed = false;
         led_state = !led_state;
         gpio_bit_write(LED_PORT, LED_PIN, led_state ? SET : RESET);
-        //const char* msg = "knopka\r\n";
-        //    for (const char* p = msg; *p; ++p) {
-        //        usart_data_transmit(USART1, *p);
-        //        while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
-        //    }
+        
     }
 
-    // Обработка команд из UART
-
     
-    //bool current_state = gpio_input_bit_get(BOT_PORT, BOT_PIN); // Читаем состояние кнопки
-    //    ButtonFSM(current_state);
-    //if (button_pressed) {
-    //    button_pressed = false;
-    //    led_state = !led_state;
-    //    gpio_bit_write(LED_PORT, LED_PIN, led_state ? SET : RESET);
-    //    const char* msg = "knopka\r\n";
-    //        for (const char* p = msg; *p; ++p) {
-    //            usart_data_transmit(USART1, *p);
-    //            while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
-    //        }
-    //}
-
-
     if (rx_ready) {
         rx_ready = 0;
 
-        
+        static uint32_t debounce_timer = 0;
+
 
         if (strcmp(rx_buf, "led on") == 0) {
             gpio_bit_write(LED_PORT, LED_PIN, SET);
@@ -168,7 +105,7 @@ while (1) {
                 usart_data_transmit(USART1, *p);
                 while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
             }
-            memset(rx_buf, 0, RX_BUF_SIZE); // <--- Очистка буфера после обработки
+            memset(rx_buf, 0, RX_BUF_SIZE); 
         } else if (strcmp(rx_buf, "led off") == 0) {
             gpio_bit_write(LED_PORT, LED_PIN, RESET);
             const char* msg = "LED OFF\r\n";
@@ -176,23 +113,27 @@ while (1) {
                 usart_data_transmit(USART1, *p);
                 while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
             }
-            memset(rx_buf, 0, RX_BUF_SIZE); // <--- Очистка буфера после обработки
-        } else if (strcmp(rx_buf, "5") == 0) {
-            //morgalka();
-            for (int i = 0; i<3; i++){
-                gpio_bit_write(LED_PORT, LED_PIN, SET);
-                timer_delay_ms(50);
-                gpio_bit_write(LED_PORT, LED_PIN, RESET);
-                timer_delay_ms(50);    
+            memset(rx_buf, 0, RX_BUF_SIZE);
+        } 
+         
+        else if (strncmp(rx_buf, "freq ", 5) == 0) {
+            uint32_t freq = atoi(rx_buf + 5);
+            if (freq > 0 && freq <= 50) {
+                morgalka(freq);
+                const char* msg = "LED MORGAET\r\n";
+                for (const char* p = msg; *p; ++p) {
+                    usart_data_transmit(USART1, *p);
+                    while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+                }
+            } else {
+                const char* msg = "Wrong freq\r\n";
+                for (const char* p = msg; *p; ++p) {
+                    usart_data_transmit(USART1, *p);
+                    while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+                }
             }
-            const char* msg = "LED MORGAET\r\n";
-            for (const char* p = msg; *p; ++p) {
-                usart_data_transmit(USART1, *p);
-                while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
-            }
-            memset(rx_buf, 0, RX_BUF_SIZE); // <--- Очистка буфера после обработки
-        }
-         else {
+            memset(rx_buf, 0, RX_BUF_SIZE);
+        } else {
             const char* msg = "Unknown command\r\n";
             for (const char* p = msg; *p; ++p) {
                 usart_data_transmit(USART1, *p);
@@ -205,11 +146,12 @@ while (1) {
 }
 
 
+
 extern "C" void USART1_IRQHandler(void)
 {
     if (usart_interrupt_flag_get(USART1, USART_INT_FLAG_RBNE) != RESET) {
         uint8_t ch = usart_data_receive(USART1);
-        // Отладка: эхо каждого символа
+        // Отладка каждого символа
         //sprintf("otladka: \r");
         //usart_data_transmit(USART1, ch);
         while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
@@ -270,7 +212,7 @@ void ButtonFSM(bool current_state) {
         case BUTTON_IDLE:
             if (current_state != prev_state) {
                 btn_state = BUTTON_DEBOUNCE;
-                debounce_timer = 150; // 50 мс
+                debounce_timer = 150; 
             }
             break;
 
@@ -309,7 +251,50 @@ void ButtonFSM(bool current_state) {
 // Обработчик 
 
 ///////////////////////////////////////////////////
+void morgalka(uint32_t freq) {
+    uint32_t delay_ms = 500 / freq; // половина периода (мигание)
+    if (delay_ms == 0) delay_ms = 1;
+    for (int i = 0; i < 3; i++) {
+        gpio_bit_write(LED_PORT, LED_PIN, SET);
+        timer_delay_ms(delay_ms);
+        gpio_bit_write(LED_PORT, LED_PIN, RESET);
+        timer_delay_ms(delay_ms);
+    }
+}
 
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+void timer_delay_init(void)
+{
+    rcu_periph_clock_enable(RCU_TIMER2);
+
+    /* Настройка параметров таймера */
+    timer_deinit(TIMER);
+    timer_parameter_struct timer_initpara;
+    timer_initpara.prescaler         = (SystemCoreClock / 1000000) - 1;
+    timer_initpara.alignedmode       = TIMER_COUNTER_EDGE;
+    timer_initpara.counterdirection  = TIMER_COUNTER_UP;
+    timer_initpara.period            = 0xFFFFFFFF;
+    timer_initpara.clockdivision     = TIMER_CKDIV_DIV1;
+    timer_initpara.repetitioncounter = 0;
+    timer_init(TIMER, &timer_initpara);
+
+    /* Запускаем таймер */
+    timer_enable(TIMER);
+}
+
+void timer_delay_us(uint32_t us)
+{
+    uint32_t start = TIMER_CNT(TIMER);
+    while ((TIMER_CNT(TIMER) - start) < us);
+}
+
+void timer_delay_ms(uint32_t ms)
+{
+    while (ms--) {
+        timer_delay_us(1000);
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////////////////////
 
  
 
