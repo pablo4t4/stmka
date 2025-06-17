@@ -1,0 +1,290 @@
+/*******************************************************************************
+ * @file    main.cpp
+ * @author  garou (xgaroux@gmail.com)
+ * @brief   Main module.
+ ******************************************************************************/
+
+ #include "gd32f30x.h"
+ #include "gd32f30x_exti.h"
+ #include "gd32f30x_usart.h"
+ #include "gd32f30x_gpio.h"
+ #include "gd32f30x_timer.h"
+ #include "systick.h"
+
+ #include <stdio.h>
+ #include <string.h>
+ #include <locale.h>
+ #include <stdlib.h>
+ 
+ #define TIMER TIMER2
+ #define LED_PIN  GPIO_PIN_5   // Пин светодиода
+ #define LED_PORT GPIOA        // Порт светодиода
+ 
+ #define BOT_PIN GPIO_PIN_13
+ #define BOT_PORT GPIOC
+ #define RX_BUF_SIZE 64
+ char rx_buf[RX_BUF_SIZE];
+ uint8_t rx_idx = 0;
+ volatile uint8_t rx_ready = 0;
+ 
+
+ typedef enum {
+    BUTTON_IDLE,
+    BUTTON_DEBOUNCE,
+    BUTTON_PRESSED
+} ButtonState;
+
+//void ButtonFSM(bool current_state);
+//void button_dispatcher(void);
+void gpio_config(void);
+void exti_config(void);
+volatile bool button_pressed = false;
+ButtonState btn_state = BUTTON_IDLE;
+volatile uint8_t blink_mode = 0; // 0 - выкл, 1 - 1 Гц, 2 - 2 Гц
+volatile uint8_t led_state = 0;
+
+// --- Таймерная настройка ---
+void timer_blink_config(uint32_t freq_hz) {
+    timer_deinit(TIMER);
+    timer_parameter_struct timer_initpara;
+    timer_initpara.prescaler         = (SystemCoreClock / 10000) - 1; // 10 кГц
+    timer_initpara.alignedmode       = TIMER_COUNTER_EDGE;
+    timer_initpara.counterdirection  = TIMER_COUNTER_UP;
+    timer_initpara.period            = (5000 / freq_hz) - 1; // половина периода (мигание)
+    timer_initpara.clockdivision     = TIMER_CKDIV_DIV1;
+    timer_initpara.repetitioncounter = 0;
+    timer_init(TIMER, &timer_initpara);
+
+    timer_interrupt_enable(TIMER, TIMER_INT_UP);
+    nvic_irq_enable(TIMER2_IRQn, 1, 1);
+    timer_enable(TIMER);
+}
+
+// --- Таймерное прерывание ---
+extern "C" void TIMER2_IRQHandler(void) {
+    if (timer_interrupt_flag_get(TIMER, TIMER_INT_UP) != RESET) {
+        timer_interrupt_flag_clear(TIMER, TIMER_INT_UP);
+        if (blink_mode) {
+            led_state = !led_state;
+            gpio_bit_write(LED_PORT, LED_PIN, led_state ? SET : RESET);
+        } else {
+            gpio_bit_write(LED_PORT, LED_PIN, RESET);
+        }
+    }
+}
+
+// --- Обработка смены режима мигания ---
+void handle_blink_mode() {
+    blink_mode++;
+    if (blink_mode == 1) {
+        timer_blink_config(1); // 1 Гц
+        timer_enable(TIMER);
+    } else if (blink_mode == 2) {
+        timer_blink_config(2); // 2 Гц
+        timer_enable(TIMER);
+    } else {
+        blink_mode = 0;
+        timer_disable(TIMER);
+        gpio_bit_write(LED_PORT, LED_PIN, RESET);
+    }
+}
+
+void handle_blink_mode(uint8_t freq_hz) {
+    if (freq_hz >= 1 && freq_hz <= 10) {
+        blink_mode = freq_hz;
+    } else {
+        blink_mode = 0;
+        gpio_bit_write(LED_PORT, LED_PIN, RESET);
+    }
+}
+
+
+
+
+// --- Прототипы функций задержки ---
+void timer_delay_ms(uint32_t ms);
+
+// --- USART обработчик ---
+extern "C" void USART1_IRQHandler(void) {
+    if (usart_interrupt_flag_get(USART1, USART_INT_FLAG_RBNE) != RESET) {
+        uint8_t ch = usart_data_receive(USART1);
+        while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+
+        if ((ch == '\r' || ch == '\n') && rx_idx > 0) {
+            rx_buf[rx_idx] = 0;
+            rx_ready = 1;
+            rx_idx = 0;
+        } else if (rx_idx < RX_BUF_SIZE - 1 && ch != '\r' && ch != '\n') {
+            rx_buf[rx_idx++] = ch;
+        } else if (rx_idx >= RX_BUF_SIZE - 1) {
+            rx_idx = 0;
+        }
+    }
+}
+
+// --- GPIO и EXTI настройка ---
+void gpio_config(void) {
+    rcu_periph_clock_enable(RCU_GPIOA);
+    gpio_init(LED_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_50MHZ, LED_PIN);
+
+    rcu_periph_clock_enable(RCU_GPIOC);
+    gpio_init(GPIOC, GPIO_MODE_IPU, GPIO_OSPEED_50MHZ, GPIO_PIN_13);
+}
+
+void exti_config(void) {
+    rcu_periph_clock_enable(RCU_AF); 
+    gpio_exti_source_select(GPIO_PORT_SOURCE_GPIOC, GPIO_PIN_SOURCE_13);
+    exti_init(EXTI_13, EXTI_INTERRUPT, EXTI_TRIG_FALLING);
+    exti_interrupt_flag_clear(EXTI_13);
+    nvic_irq_enable(EXTI10_15_IRQn, 0, 0);
+}
+
+// --- EXTI обработчик кнопки ---
+extern "C" void EXTI10_15_IRQHandler(void) {
+    if (exti_interrupt_flag_get(EXTI_13) != RESET) {
+        button_pressed = true;
+        exti_interrupt_flag_clear(EXTI_13);
+    }
+}
+
+
+uint8_t button_dispatcher()
+//void button_dispatcher()
+{
+    bool current_state = gpio_input_bit_get(BOT_PORT, BOT_PIN);
+    uint8_t event;
+    static bool prev_state = 1;
+    static uint32_t debounce_timer = 0;
+
+
+    switch(btn_state) {
+        case BUTTON_IDLE:
+            if (current_state != prev_state) {
+                //event = 0;
+                btn_state = BUTTON_DEBOUNCE;
+                debounce_timer = 150;
+                event = 0;
+            }
+            break;
+
+        case BUTTON_DEBOUNCE:
+            if (--debounce_timer == 0) {
+                if (current_state == 0) {
+                    //event = 1;
+                    btn_state = BUTTON_PRESSED;
+                    debounce_timer = 150;
+                    event = 1;
+
+                    // Кнопка нажата
+                    
+                } else {
+                    btn_state = BUTTON_IDLE;
+                }
+                //prev_state = current_state;
+            }
+            break;
+
+        case BUTTON_PRESSED:
+            if (current_state == 1) { // Кнопка отпущена
+                //event = 3;
+                btn_state = BUTTON_DEBOUNCE;
+                
+                debounce_timer = 150;
+                event = 2;
+                //delay_1ms(150);
+            }
+            break;
+    }
+    prev_state = current_state;
+    return event;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+extern "C" int main(void) {
+    gpio_config();
+    exti_config();
+    //systick_config();
+
+    // Настройка USART
+    rcu_periph_clock_enable(RCU_GPIOA);
+    rcu_periph_clock_enable(RCU_USART1);
+    gpio_init(GPIOA, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_2);
+    gpio_init(GPIOA, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, GPIO_PIN_3);
+    usart_deinit(USART1);
+    usart_baudrate_set(USART1, 115200);
+    usart_word_length_set(USART1, USART_WL_8BIT);
+    usart_stop_bit_set(USART1, USART_STB_1BIT);
+    usart_parity_config(USART1, USART_PM_NONE);
+    usart_transmit_config(USART1, USART_TRANSMIT_ENABLE);
+    usart_receive_config(USART1, USART_RECEIVE_ENABLE);
+    usart_enable(USART1);
+    nvic_irq_enable(USART1_IRQn, 0, 0);
+    usart_interrupt_enable(USART1, USART_INT_RBNE);
+
+    // Основной цикл
+    while (1) {
+        //gpio_bit_write(LED_PORT, LED_PIN, SET);
+        //delay_1ms(5000); // Задержка 5000 мс
+        //gpio_bit_write(LED_PORT, LED_PIN, RESET);
+        //delay_1ms(5000); // Задержка 5000 мс
+        
+        //button_dispatcher();
+        uint8_t event = button_dispatcher();
+        
+        //char dbg[32];
+        //snprintf(dbg, sizeof(dbg), "event = %u\r\n", event);
+        //for (const char* p = dbg; *p; ++p) {
+        //    usart_data_transmit(USART1, *p);
+        //    while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+        //}
+
+        const char* msg = nullptr;
+        switch (event)
+        {
+        case 1: // Кнопка нажата
+             msg = "button pushed\r\n";
+                    for (const char* p = msg; *p; ++p) {
+                        usart_data_transmit(USART1, *p);
+                        while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+                    }
+                    handle_blink_mode(); // <-- запуск/смена мигания
+            break;
+        
+        case 2: // Кнопка отпущена
+             msg = "button released\r\n";
+                for (const char* p = msg; *p; ++p) {
+                    usart_data_transmit(USART1, *p);
+                    while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+                }        
+            break;
+        }
+        
+
+
+        // UART-команды (если нужно)
+        if (rx_ready) {
+            rx_ready = 0;
+            int value = atoi(rx_buf);
+            if (value<0){
+                const char* msg = "Unknown command\r\n";
+                for (const char* p = msg; *p; ++p) {
+                    usart_data_transmit(USART1, *p);
+                    while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+                }
+            
+            memset(rx_buf, 0, RX_BUF_SIZE); // <--- Очистка буфера после обработки
+            } else{
+                handle_blink_mode(value); // <-- запуск/смена мигания
+                const char* msg = "Blink mode changed\r\n";
+                for (const char* p = msg; *p; ++p) {
+                    usart_data_transmit(USART1, *p);
+                    while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+                }
+            memset(rx_buf, 0, RX_BUF_SIZE);
+            }
+
+        }
+        
+    }
+} 
+ /***************************** END OF FILE ************************************/
