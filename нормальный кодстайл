@@ -1,0 +1,226 @@
+#include "gd32f30x.h"
+#include "gd32f30x_exti.h"
+#include "gd32f30x_usart.h"
+#include <stdio.h>
+#include "gd32f30x_gpio.h"
+#include <string.h>
+#include <locale.h>
+#include <cstdint>
+#include <stdlib.h>
+
+#define TIMER TIMER2
+#define LED_PIN  GPIO_PIN_5   
+#define LED_PORT GPIOA        
+#define BOT_PIN GPIO_PIN_13
+#define BOT_PORT GPIOC
+
+
+
+void timer_delay_init(void)
+{
+    rcu_periph_clock_enable(RCU_TIMER2);
+
+    /* Настройка параметров таймера */
+    timer_deinit(TIMER);
+    timer_parameter_struct timer_initpara;
+    timer_initpara.prescaler         = (SystemCoreClock / 1000000) - 1;
+    timer_initpara.alignedmode       = TIMER_COUNTER_EDGE;
+    timer_initpara.counterdirection  = TIMER_COUNTER_UP;
+    timer_initpara.period            = 0xFFFFFFFF;
+    timer_initpara.clockdivision     = TIMER_CKDIV_DIV1;
+    timer_initpara.repetitioncounter = 0;
+    timer_init(TIMER, &timer_initpara);
+
+    /* Запускаем таймер */
+    timer_enable(TIMER);
+}
+
+void timer_delay_us(uint32_t us)
+{
+    uint32_t start = TIMER_CNT(TIMER);
+    while ((TIMER_CNT(TIMER) - start) < us);
+}
+
+void timer_delay_ms(uint32_t ms)
+{
+    while (ms--) {
+        timer_delay_us(1000);
+    }
+}
+
+void gpio_config(void)
+ {
+     rcu_periph_clock_enable(RCU_GPIOA);
+     gpio_init(LED_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_50MHZ, LED_PIN);
+     
+     rcu_periph_clock_enable(RCU_GPIOC);
+     gpio_init(GPIOC, GPIO_MODE_IPU, GPIO_OSPEED_50MHZ, GPIO_PIN_13);
+ }
+
+void exti_config(void)
+{
+    rcu_periph_clock_enable(RCU_AF); 
+
+    
+    gpio_exti_source_select(GPIO_PORT_SOURCE_GPIOC, GPIO_PIN_SOURCE_13);
+    exti_init(EXTI_13, EXTI_INTERRUPT, EXTI_TRIG_FALLING); // Прерывание по спаду (кнопка нажата)
+    exti_interrupt_flag_clear(EXTI_13); // Очищаем флаг прерывания
+
+    // Настраиваем NVIC (включаем прерывание EXTI15_10)
+    nvic_irq_enable(EXTI10_15_IRQn, 0, 0); // Приоритет 2, подприоритет 0
+}
+
+class knopka{
+private:
+typedef enum 
+{
+    BUTTON_IDLE,
+    BUTTON_DEBOUNCE,
+    BUTTON_PRESSED
+} 
+ButtonState;
+ButtonState btn_state = BUTTON_IDLE;
+volatile static bool button_pressed;
+
+public:
+static void IRQHandler() {
+        if (exti_interrupt_flag_get(EXTI_13) != RESET) {
+            button_pressed = true; 
+            exti_interrupt_flag_clear(EXTI_13);
+        }
+    }
+uint8_t button_dispatcher()
+{
+    bool current_state = gpio_input_bit_get(BOT_PORT, BOT_PIN);
+    uint8_t event;
+    static bool prev_state = 1;
+    static uint32_t debounce_timer = 0;
+
+
+    switch(btn_state) {
+        case BUTTON_IDLE:
+            if (current_state != prev_state) {
+                //event = 0;
+                btn_state = BUTTON_DEBOUNCE;
+                debounce_timer = 150;
+                event = 0;
+            }
+            break;
+
+        case BUTTON_DEBOUNCE:
+            if (--debounce_timer == 0) {
+                if (current_state == 0) {
+                    //event = 1;
+                    btn_state = BUTTON_PRESSED;
+                    debounce_timer = 150;
+                    event = 1;
+
+                    // Кнопка нажата
+                    
+                } else {
+                    btn_state = BUTTON_IDLE;
+                }
+                //prev_state = current_state;
+            }
+            break;
+
+        case BUTTON_PRESSED:
+            if (current_state == 1) { // Кнопка отпущена
+                //event = 3;
+                btn_state = BUTTON_DEBOUNCE;
+                
+                debounce_timer = 150;
+                event = 2;
+                //delay_1ms(150);
+            }
+            break;
+    }
+    prev_state = current_state;
+    return event;
+    
+}
+};
+
+
+
+
+
+volatile bool knopka::button_pressed = false;
+extern "C" void EXTI10_15_IRQHandler(void) {
+    knopka::IRQHandler();
+}
+
+
+
+extern "C" int main(void){
+    gpio_config();
+    timer_delay_init();
+    exti_config();
+    setlocale(LC_ALL, "RUS");
+    // Включение тактирования портов и USART1
+    rcu_periph_clock_enable(RCU_GPIOA);
+    rcu_periph_clock_enable(RCU_USART1);
+
+    // Настройка GPIO: PA2 (TX) - альт. функция push-pull, PA3 (RX) - вход
+    gpio_init(GPIOA, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_2);
+    gpio_init(GPIOA, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, GPIO_PIN_3);
+
+    // Настройка USART1
+    usart_deinit(USART1);
+    usart_baudrate_set(USART1, 115200);
+    usart_word_length_set(USART1, USART_WL_8BIT);
+    usart_stop_bit_set(USART1, USART_STB_1BIT);
+    usart_parity_config(USART1, USART_PM_NONE);
+    usart_transmit_config(USART1, USART_TRANSMIT_ENABLE);
+    usart_receive_config(USART1, USART_RECEIVE_ENABLE);
+    usart_enable(USART1);
+
+    nvic_irq_enable(USART1_IRQn, 0, 0);
+    usart_interrupt_enable(USART1, USART_INT_RBNE);
+
+    knopka obj;
+    //obj.button_dispatcher();
+    uint8_t event = obj.button_dispatcher();
+    const char* msg = nullptr;
+    while(1){
+        uint8_t event = obj.button_dispatcher();
+        //char debug_msg[50];
+        //snprintf(debug_msg, sizeof(debug_msg), "Event: %d\r\n", event);
+        //for(const char* p = debug_msg; *p; ++p) {
+        //        usart_data_transmit(USART1, *p);
+        //        while(usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+        //    }
+        switch (event)
+        {
+        case 1: // Кнопка нажата
+            
+             msg = "button pushed\r\n";
+                    for (const char* p = msg; *p; ++p) {
+                        usart_data_transmit(USART1, *p);
+                        while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+                    }
+                    //handle_blink_mode(); // <-- запуск/смена мигания
+                    gpio_bit_write(LED_PORT, LED_PIN, SET);
+            break;
+        
+        case 2: // Кнопка отпущена
+             msg = "button released\r\n";
+                for (const char* p = msg; *p; ++p) {
+                    usart_data_transmit(USART1, *p);
+                    while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+                }   
+                gpio_bit_write(LED_PORT, LED_PIN, RESET);     
+            break;
+        }        
+    }
+}
+
+
+
+
+
+
+
+
+
+
